@@ -1,5 +1,5 @@
 ---
-title: "stipm"
+title: "Willapa Bay natural coho forecast"
 author: "Dan.Auerbach@dfw.wa.gov, Thomas.Buehrens@dfw.wa.gov, and Neala.Kendall@dfw.wa.gov" 
 date: "`r Sys.Date()`"
 editor_options: 
@@ -51,7 +51,7 @@ fp <- list(
 #   dplyr::select(pop_id:hat)
 # #deleted and reindexed pop in file, no longer need: |> dplyr::filter(StockID != 13, StockID != 43)
 
-coho_data_tbl <- readr::read_csv(fp$data_full)
+coho_data_tbl <- readr::read_csv(fp$data_full) #can explore coercing pre-1998 FRAM to NA while including older MS & smolt 
 
 sf_coord <- coho_data_tbl |> 
   distinct(StockID, StockLongName, pop_id, pop, lon, lat, hab_km) |> 
@@ -722,21 +722,21 @@ oat_lag1 <- oat_wrap(iter = 3000, chain = 4, oat_data_year_min = 1998, oat_years
 
 # Results
 
-Saved output from the OAT runs is read back into memory and joined with observations to allow examination of performance skill.
+Saved output from the one-ahead runs is read back into memory and joined with observations to allow examination of performance skill.
 
 ```{r read_oat_and_oat_obs}
-# #tibbles of annual predictions for AR1 & STIPM with a given lag 
+# #tibbles of annual predictions for AR1 & STIPM with a given lag
 # bind_rows(
 #   list.files("oat_fits", pattern = "lags_spwn0_hvst0", full.names = T) |>
-#     map_df(~readRDS(.x)) |> mutate(lag_mod = paste0("l0_", mod))
-#   ,
-#   list.files("oat_fits", pattern = "lags_spwn1_hvst1", full.names = T) |> 
 #     map_df(~readRDS(.x)) |> mutate(lag_mod = paste0("l1_", mod))
 #   ,
-#   list.files("oat_fits", pattern = "lags_spwn2_hvst2", full.names = T) |> 
+#   list.files("oat_fits", pattern = "lags_spwn1_hvst1", full.names = T) |>
 #     map_df(~readRDS(.x)) |> mutate(lag_mod = paste0("l2_", mod))
-# ) |> 
-#   select(lag_mod, year, StockID, pop_id, pop, n_diverg, n_eff, Rhat, `2.5%`:`97.5%`) |> 
+#   ,
+#   list.files("oat_fits", pattern = "lags_spwn2_hvst2", full.names = T) |>
+#     map_df(~readRDS(.x)) |> mutate(lag_mod = paste0("l3_", mod))
+# ) |>
+#   select(lag_mod, year, StockID, pop_id, pop, n_diverg, n_eff, Rhat, `2.5%`:`97.5%`) |>
 #   saveRDS("oat_fits/oat_l0_l1_l2_2009_2019.rds")
 
 oat <- readRDS("oat_fits/oat_l0_l1_l2_2009_2019.rds")
@@ -763,35 +763,39 @@ oat_obs <- left_join(
     err_log = log(`50%`) - log(rtrn),
     err_pct = err / rtrn,
     err_abs_pct = err_abs / rtrn,
+    lar = log(`50%`/rtrn), #log accuracy ratio, used for median symmetric accuracy as described in Morley et al 2018
     #kept as Eq26 in paper with pred-obs
     mase = abs(`50%` - rtrn) / scale_err
   )
 )
+
+#oat |> count(lag_mod) ; oat_obs |> count(lag_mod)
 ```
 
-Deterministic trailing means - Not sure we want/need this?
+We can also generate deterministic trailing means for comparison.
 
 ```{r trailing_means}
 #create a temp col of the best case values that would be available in a given forecast year (i.e., up to year - 1)
-#use slider to create rolling mean over 3 and 5 prior values
-#this probably provides more recent return data than would truly be available...
-rtrn_mu <- coho_data_tbl |> 
+#then create rolling mean over prior values
+rtrn_trail_mean <- coho_data_tbl |> 
   select(StockID, pop_id, pop, year, rtrn) |>
   group_by(StockID, pop_id, pop) |> 
   mutate(
-    rtrn_avail = c(NA, head(rtrn, -1)),
-    rtrn_mu_3 = slider::slide_dbl(rtrn_avail, mean, .before = 2),
-    rtrn_mu_5 = slider::slide_dbl(rtrn_avail, mean, .before = 4)
+    lag3_rtrn = c(NA, NA, NA, head(rtrn, -3)),
+    l3_trail_mean = slider::slide_dbl(lag3_rtrn, ~mean(., na.rm=T), .before = 2),
+    lag2_rtrn = c(NA, NA, head(rtrn, -2)),
+    l2_trail_mean = slider::slide_dbl(lag2_rtrn, ~mean(., na.rm=T), .before = 2)
   ) |> 
   ungroup() |> 
-  filter(year >= 2009) |> select(-rtrn_avail) |>  
-  pivot_longer(cols = contains("rtrn_mu"), names_to = "lag_mod", values_to = "50%") |> 
+  filter(between(year, 2009, 2019)) |> select(-starts_with("lag")) |>  
+  pivot_longer(cols = contains("trail"), names_to = "lag_mod", values_to = "50%") |> 
   mutate(
     err = `50%` - rtrn, 
     err_abs = abs(err),
     err_log = log(`50%`) - log(rtrn),
     err_pct = err / rtrn,
     err_abs_pct = err_abs / rtrn,
+    lar = log(`50%`/rtrn)
   )
 
 ```
@@ -799,31 +803,30 @@ rtrn_mu <- coho_data_tbl |>
 ## Diagnostics
 
 ```{r oat_rhat_neff_n_diverg}
-#all years, all pops
-oat |> 
-  group_by(lag_mod) |> 
-  summarise(
-    n_diverg = max(n_diverg),
-    Rhat_med = median(Rhat), Rhat_max = max(Rhat),
-    n_eff_med = median(n_eff), n_eff_min = min(n_eff),
-    .groups = "drop")
+# #all years, all pops
+# oat |> 
+#   group_by(lag_mod) |> 
+#   summarise(
+#     n_diverg = max(n_diverg),
+#     Rhat_med = median(Rhat), Rhat_max = max(Rhat),
+#     n_eff_med = median(n_eff), n_eff_min = min(n_eff),
+#     .groups = "drop")
 
-#by year, all pops
-oat |> 
-  group_by(lag_mod, year) |> 
-  summarise(
-    n_diverg = max(n_diverg),
-    Rhat_med = median(Rhat), Rhat_max = max(Rhat),
-    n_eff_med = median(n_eff), n_eff_min = min(n_eff),
-    .groups = "drop") |> 
-  #  print(n = 100)
-  gt::gt(rowname_col = "lag_mod") |>
-  gt::tab_header(title = "One-ahead Rhat and effective draws", subtitle = "Willapa Bay Natural") |>
-  gt::fmt_number(contains("Rhat"), decimals = 2) |>
-  gt::fmt_number(contains("n_eff"), decimals = 0)
+# #by year, all pops
+# oat |> 
+#   group_by(lag_mod, year) |> 
+#   summarise(
+#     n_diverg = max(n_diverg),
+#     Rhat_med = median(Rhat), Rhat_max = max(Rhat),
+#     n_eff_med = median(n_eff), n_eff_min = min(n_eff),
+#     .groups = "drop") |> 
+#   #  print(n = 100)
+#   gt::gt(rowname_col = "lag_mod") |>
+#   gt::tab_header(title = "One-ahead Rhat and effective draws", subtitle = "Willapa Bay Natural") |>
+#   gt::fmt_number(contains("Rhat"), decimals = 2) |>
+#   gt::fmt_number(contains("n_eff"), decimals = 0)
 
 #Willapa, all years, similar to "all pops"
-#no diffs between lags for Rhat
 oat |> 
   filter(StockID == 161) |> 
   # arrange(lag_mod, year) |>
@@ -841,19 +844,237 @@ oat |>
   gt::fmt_number(contains("Rhat"), decimals = 2) |> 
   gt::fmt_number(contains("n_eff"), decimals = 0)
 
-#n_eff boxes
-oat |> 
-  filter(StockID == 161, str_detect(lag_mod, "stipm")) |> 
-  ggplot(aes(lag_mod, n_eff)) + geom_boxplot() + geom_jitter(width = 0.1)
-#n_eff col timeseries, arguably slightly better after 2012
-oat |> 
-  filter(StockID == 161, str_detect(lag_mod, "stipm")) |> 
-  ggplot(aes(factor(year), n_eff, fill = lag_mod)) + geom_col(position = "dodge") + scale_fill_grey()
+# #n_eff boxes
+# oat |> 
+#   filter(StockID == 161, str_detect(lag_mod, "stipm")) |> 
+#   ggplot(aes(lag_mod, n_eff)) + geom_boxplot() + geom_jitter(width = 0.1)
+# #n_eff col timeseries, arguably slightly better after 2012
+# oat |> 
+#   filter(StockID == 161, str_detect(lag_mod, "stipm")) |> 
+#   ggplot(aes(factor(year), n_eff, fill = lag_mod)) + geom_col(position = "dodge") + scale_fill_grey()
 
 ```
 
-
 ## One-ahead Performance
+
+```{r}
+pal_lag_mod <- c("purple", "gold", "cyan") #ar1, stipm, trailing arith mean
+```
+
+### Lag3 paneled by year
+
+```{r oat_obs_pred_patchwork}
+set_names(2008:2018) |> 
+  map(function(x) {
+    d <- coho_data_tbl |> filter(StockID == 161, between(year, 1998, x)) |> select(year, StockID, pop, rtrn) |> mutate(year = as.character(year))
+    # d <- stan_data_filter(coho_data_tbl, data_year_min = 1998, data_year_max = x, lag_spwn = 2, lag_hvst = 2, lag_MS = 1, lag_smolt = 0) |> 
+    #    pluck("rtrn") |> filter(StockID == 161) |> select(year, StockID, pop, rtrn) |> mutate(year = as.character(year))
+    
+    oat_obs |> 
+      filter(StockID == 161, str_detect(lag_mod, "l3"), year == x+1) |> mutate(year = as.character(year)) |> 
+      ggplot() +
+      #all pre-forecast data
+      geom_col(data = d, aes(x = year, y = rtrn), fill = grey(0.8), width = 0.5) +
+      #available data for L3
+      geom_col(data = d |> filter(year %in% as.character(1998:x-2)), aes(x = year, y = rtrn), fill = grey(0.4), width = 0.5) +
+      #observed in forecast year
+      geom_point(aes(x = year, y = rtrn), color = 1, shape = 17)  +
+      #forecasts
+      geom_pointrange(aes(x = year, y = `50%`, ymin = `25%`, ymax = `75%`, color = lag_mod), fatten = 1.1, position = position_dodge(width = 0.5), show.legend = F) +
+      geom_point(aes(x = year, y = `50%`, color = lag_mod), position = position_dodge(width = 0.5), show.legend = F) +
+      geom_vline(xintercept = as.character(x-2), linetype = "dotted", size = 1) +
+      scale_x_discrete(name = "", limits = as.character(1998:2020), drop = FALSE) +
+      scale_y_continuous(name = "Return", limits = c(0,125000), labels = scales::comma) + #limits drops point error when outside ymax
+      scale_color_manual(name = "", values = pal_lag_mod) +
+      theme(axis.text = element_text(size = 6), axis.title = element_text(size = 5))
+    #+ labs(subtitle = paste("Predicting", x+1))
+}) |> 
+  patchwork::wrap_plots(ncol = 1)
+
+ggsave("O:/code/coho/forecast_wb/f_oat_l3_by_pred_year.png", width = 7, height = 9)
+```
+
+### Lag3 50th with ribbons
+
+```{r l3_50th_ribbons}
+oat_ribbon <- function(stk = 161, lg_md = "l3"){
+  d <- oat_obs |> filter(StockID == stk, str_detect(lag_mod, lg_md))
+  ggplot(d, aes(year)) + 
+    geom_col(data = coho_data_tbl |> filter(StockID == stk, between(year, 1998, 2008)) |> select(year, StockID, pop, rtrn), aes(y = rtrn), fill = grey(0.6)) +
+    geom_col(data = coho_data_tbl |> filter(StockID == stk, between(year, 2009, 2019)) |> select(year, StockID, pop, rtrn), aes(y = rtrn), fill = grey(0.6)) +
+    #geom_ribbon(aes(ymin = `2.5%`, ymax = `97.5%`, color = lag_mod, fill = lag_mod), alpha = 0.2) + 
+    geom_ribbon(aes(ymin = `25%`, ymax = `75%`, color = lag_mod, fill = lag_mod), alpha = 0.4) + 
+    geom_line(aes(y = `50%`, color = lag_mod), size = 1.2) +
+    scale_x_continuous(name = "", breaks = 1998:2020, labels = 1998:2020, guide = guide_axis(n.dodge = 2)) +
+    scale_y_continuous(name = "Return", labels = scales::comma) +
+    scale_color_manual(name = "", values = c("purple", "gold"), na.translate = FALSE, aesthetics = c("color", "fill")) +
+    theme(legend.position = "top") +
+    labs(title = d$pop[1])
+}
+
+oat_ribbon()
+ggsave("O:/code/coho/forecast_wb/f_oat_l3_pred_single_panel.png", width = 7, height = 5)
+
+# oat_ribbon(131) #Quill Fall, accurate
+# oat_ribbon(153) #Hump, STIPM very good in later years
+# oat_ribbon(111) #Elwha, wacky
+# oat_ribbon(157) #GH, bouncy
+# oat_ribbon(35) #Snohomish, STIPM def looks better but MSA worst...
+
+```
+
+### Rank order of WB returns 1998:2019
+
+```{r wb_rtrn_rank_order}
+coho_data_tbl |> 
+  filter(StockID == 161, between(year, 1998, 2019)) |> 
+  mutate(year = factor(year)) |> 
+  ggplot(aes(fct_reorder(year, rtrn, min, .desc = T), rtrn)) +
+  geom_col() +
+  scale_x_discrete("Return year ordered by magnitude", guide = guide_axis(n.dodge = 2)) +
+  scale_y_continuous(name = "Return", labels = scales::comma)
+
+ggsave("O:/code/coho/forecast_wb/f_wb_return_rank_ordered.png", width = 6, height = 4)
+```
+
+### Lag3 error time series
+
+```{r l3_error_series}
+ggdata <- bind_rows(oat_obs, rtrn_trail_mean) |> 
+  filter(StockID == 161, str_detect(lag_mod, "l3")) |> 
+  arrange(year, lag_mod) |> 
+  mutate(year = as.character(year))
+
+ggplot(ggdata, aes(year)) + 
+  geom_col(aes(y = err, color = lag_mod, fill = lag_mod), position = position_dodge(), width = 0.7) +
+  geom_hline(
+    data = ggdata |> group_by(lag_mod) |> summarise(err = mean(err), .groups = "drop"),
+    aes(yintercept = err, color = lag_mod),
+    linetype = "dashed", size = 1.1) +
+  scale_x_discrete(name = "", guide = guide_axis(n.dodge = 2)) +
+  scale_y_continuous(name = "Error, 50th - obs", labels = scales::comma) + #limits drops point error when outside ymax
+  scale_color_manual(name = "", values = pal_lag_mod, na.translate = FALSE, aesthetics = c("color", "fill")) +
+  theme(legend.position = "top")
+
+ggsave("O:/code/coho/forecast_wb/f_oat_l3_error.png", width = 7, height = 5)
+
+
+# ggdata <- bind_rows(oat_obs, rtrn_trail_mean) |> 
+#   filter(StockID == 161, str_detect(lag_mod, "l3|l2")) |> 
+#   arrange(year, lag_mod) |> 
+#   mutate(
+#     year = as.character(year),
+#     lag = str_sub(lag_mod, 1,2),
+#     mod = str_sub(lag_mod, 4, 40))
+# 
+# ggplot(ggdata, aes(year)) + 
+#   geom_col(aes(y = err, color = mod, fill = mod), position = position_dodge(), width = 0.7) +
+#   geom_hline(
+#     data = ggdata |> group_by(lag_mod, lag, mod) |> summarise(err = mean(err), .groups = "drop"),
+#     aes(yintercept = err, color = mod),
+#     linetype = "dashed", size = 1.1) +
+#   scale_x_discrete(name = "", guide = guide_axis(n.dodge = 2)) +
+#   scale_y_continuous(name = "Error, 50th - obs", labels = scales::comma) + #limits drops point error when outside ymax
+#   scale_color_manual(name = "", values = pal_lag_mod, na.translate = FALSE, aesthetics = c("color", "fill")) +
+#   facet_wrap(~lag, scales = "free") +
+#   theme(legend.position = "top")
+
+```
+
+### Summarized performance measures
+
+```{r gt_perf_measures}
+
+bind_rows(oat_obs, rtrn_trail_mean) |>
+  arrange(year, lag_mod) |>
+  group_by(StockID, pop, lag_mod) |> 
+  summarise(
+    msa = 100*(exp(median(abs(lar))) - 1),
+    me = mean(err),
+    mpe = 100*median(err_pct),
+    rmse = sqrt(mean(err^2)),
+    .groups = "drop") |> 
+  mutate(
+    lag = paste("Lag", str_sub(lag_mod, 2,2)),
+    mod = toupper(str_sub(lag_mod, 4, 40))
+    ) |> 
+  filter(StockID == 161) |>
+  gt::gt(rowname_col = "mod", groupname_col = "lag") |> 
+  gt::cols_hide(c(StockID, pop, lag_mod)) |> 
+  gt::fmt_percent(columns = c(msa, mpe), scale_values = F, decimals = 1) |> 
+  gt::fmt_number(columns = c(me, rmse), decimals = 0) |> 
+  gt::data_color(
+    columns = msa, 
+    colors = scales::col_numeric(palette = c("white", "orange", "red"), domain = c(0,200), na.color = "red")
+  ) |> 
+  gt::tab_header(
+    title = "One-ahead Performance Measures", 
+    subtitle = "AR1 and STIPM calculated from posterior median") |> 
+  gt::tab_source_note("Median Symmetric Accuracy (MSA), Mean Error (ME)") |> 
+  gt::tab_source_note("Median Percent Error (MPE), Root Mean Square Error (RMSE)") |> 
+
+  gt::gtsave("O:/code/coho/forecast_wb/gt_oat_perf_measures.png", expand = 20)
+
+# oat_obs_msa <- bind_rows(oat_obs, rtrn_trail_mean) |>
+#   arrange(year, lag_mod) |>
+#   group_by(StockID, pop, lag_mod) |> 
+#   summarise(
+#     msa = 100*(exp(median(abs(lar))) - 1)
+#     , .groups = "drop")
+
+# #some series, e.g., Quillayute Fall (131), are much more accurately forecast...
+# #looks like some are just screwy
+# oat_obs_msa |> 
+#   filter(str_detect(lag_mod, "l3|l2")) |> 
+#   pivot_wider(names_from = lag_mod, values_from = msa) |> 
+#   arrange(l3_stipm) |> #print(n=40) 
+#   gt::gt() |> 
+#   gt::fmt_number(columns = -c(StockID, pop), decimals = 1) |> 
+#   gt::grand_summary_rows(columns = -c(StockID, pop), fns = list(median = "median", mean = "mean")) |> 
+#   gt::data_color(
+#     columns = -c(StockID, pop), 
+#     colors = scales::col_numeric(palette = c("white", "orange", "red"), domain = c(0,400), na.color = "red")
+#   ) |> 
+#   gt::tab_header("One-ahea Median Symmetric Accuracy (MSA)", subtitle = "Posterior median for AR1 and STIPM predictions")
+
+# #older summaries across other measures
+# oat_obs |> 
+#   group_by(StockID, pop_id, pop, lag_mod) |> 
+#   summarise(across(err:mase, list(mean = ~mean(.), median = ~median(.))), .groups = "drop") |> 
+#   select(StockID:lag_mod, contains("median"), contains("mean")) |> 
+#   filter(StockID == 161)
+  
+```
+
+### Overlaid posterior medians by lag
+
+```{r oat_lag_overlay}
+oat_lag_overlay <- function(stk = 161){
+  d <- oat_obs |> filter(StockID == stk) |> 
+    mutate(
+      lag = paste("Lag", str_sub(lag_mod, 2,2)),
+      mod = toupper(str_sub(lag_mod, 4, 40))
+    )
+ 
+  ggplot(d, aes(year)) + 
+    geom_col(data = coho_data_tbl |> filter(StockID == stk, between(year, 1998, 2008)) |> select(year, StockID, pop, rtrn), aes(y = rtrn), fill = grey(0.6)) +
+    geom_col(data = coho_data_tbl |> filter(StockID == stk, between(year, 2009, 2019)) |> select(year, StockID, pop, rtrn), aes(y = rtrn), fill = grey(0.6)) +
+    geom_line(aes(y = `50%`, color = lag), size = 1.2) +
+    scale_x_continuous(name = "", breaks = 1998:2020, labels = 1998:2020, guide = guide_axis(n.dodge = 2)) +
+    scale_y_continuous(name = "Return", labels = scales::comma) + 
+    scale_color_manual("", values = as.vector(wacolors::wa_pal("rainier", which = c("ground","winter_sky","paintbrush"))), aesthetics = c("color", "fill")) +
+    facet_wrap(~mod, ncol = 1) + 
+    theme(legend.position = "top") +
+    labs(title = d$pop[1], color = "", fill = "")
+  
+}
+
+oat_lag_overlay()
+
+ggsave("O:/code/coho/forecast_wb/f_oat_pred_lag_overlay.png", width = 7, height = 9)
+```
+
+
 
 ```{r wb_plots}
 #error: pred - obs, 
@@ -925,57 +1146,6 @@ oat_obs |> filter(StockID == 161) |>
   facet_wrap(~lag_mod, ncol = 2)
 
 ```
-
-```{r starting_to_compare_trailing_mean}
-oat_obs |> filter(StockID == 161) |> filter(str_detect(lag_mod, "stipm"))  |> print(n=100)
-rtrn_mu |> filter(StockID == 161) |> arrange(lag_mod, year) |> print(n=100)
-
-bind_rows(
-  oat_obs |> 
-    group_by(StockID, pop_id, pop, lag_mod) |> 
-    summarise(across(err:mase, list(mean = ~mean(.), median = ~median(.))), .groups = "drop") |> 
-    select(StockID:lag_mod, contains("median"), contains("mean")) |> 
-    filter(StockID == 161) |> 
-    filter(str_detect(lag_mod, "stipm"))
-  ,
-  rtrn_mu |> 
-    group_by(StockID, pop_id, pop, lag_mod) |> 
-    summarise(across(err:err_abs_pct, list(mean = ~mean(.), median = ~median(.))), .groups = "drop") |> 
-    select(StockID:lag_mod, contains("median"), contains("mean")) |> 
-    filter(StockID == 161) 
-) |> 
-  gt::gt()
-```
-
-```{r first_look_other_pops}
-pops <- c(161, 149, 145, 153, 23, 35)
-
-oat_obs |> 
-  filter(StockID %in% pops, lag_mod == "l2_stipm") |> 
-  ggplot(aes(rtrn, `50%`, label = year)) + 
-  geom_abline(slope = 1, intercept = 0) +
-  geom_point() + 
-  geom_pointrange(aes(ymin = `25%`, ymax = `75%`)) +
-  geom_text(hjust = -0.2) + 
-  scale_x_continuous(labels = scales::comma) +
-  scale_y_continuous("One-ahead forecast", labels = scales::comma) +
-  facet_wrap(~StockID+pop, ncol = 2, scales = "free") +
-  labs(subtitle = "l2_stipm, 50th + IQR on 1:1")
-
-oat_obs |> 
-  filter(StockID %in% pops, lag_mod == "l2_stipm") |> 
-  ggplot(aes(year, group = StockID)) + 
-  geom_col(data = filter(pre_oat, StockID %in% pops), aes(y = rtrn), fill = grey(0.8)) +
-  geom_col(aes(y = rtrn)) +
-  geom_line(aes(y = `50%`), color = 4, size = 1.2) + 
-  facet_wrap(~StockID+pop, ncol = 2, scales = "free")
-
-
-
-```
-
-
-### clean up
 
 ```{r oat_obs_mase_by_lag, eval=FALSE}
 #MASE ratios by lag
@@ -1077,26 +1247,6 @@ oat_obs |>
 ```
 
 
-```{r oat_obs_pred_patchwork, eval=FALSE}
-set_names(2009:2017) |> 
-  map(function(x) {
-    d <- coho_data_tbl |> filter(pop_id == 34, between(year, 1998, x)) |> select(year, pop_id, rtrn) |> mutate(year = as.character(year))
-    
-    oat_obs |> 
-      filter(pop_id == 34, str_detect(lag_mod, "l1"), year == x+1) |> mutate(year = as.character(year)) |> 
-      ggplot() +
-      geom_pointrange(aes(x = year, y = `50%`, ymin = `10%`, ymax = `90%`, color = lag_mod), fatten = 1.1, position = position_dodge(width = 0.5)) +
-      geom_point(aes(x = year, y = `50%`, color = lag_mod), position = position_dodge(width = 0.5)) +
-      geom_point(aes(x = year, y = rtrn), color = 1, shape = 2)  +
-      #geom_line(data = d, aes(x = year, y = rtrn), color = "brown") +
-      geom_point(data = d, aes(x = year, y = rtrn), color = "brown", shape = 16) +
-      geom_vline(xintercept = as.character(x-1), linetype = "dashed") +
-      scale_x_discrete(name = "", limits = as.character(1998:2018), drop = FALSE) +
-      scale_y_continuous(name = "Return", limits = c(0, 150000), labels = scales::comma) + #limits drops point error when outside ymax
-      scale_color_manual(name = "", values = c("grey", "gold"))
-}) |> patchwork::wrap_plots(ncol = 1)
-```
-
 ```{r oat_obs_pred_gganimate, eval=FALSE}
 animate(
   set_names(2009:2017) |> 
@@ -1139,10 +1289,10 @@ anim_save("oat_l1_anim.gif")
 # REVISE Full dataset
 
 ```{r full_data, eval=FALSE}
-iter <- 300
+iter <- 400
 chain <- 2
 data_year_min <- 1998
-data_year_max <- 2010
+data_year_max <- 2019
 
 (stan_data_list <- stan_data_filter(coho_data_tbl, 
                                    data_year_min = data_year_min, 
@@ -1187,7 +1337,7 @@ fit_stipm_pred <- summary(fit_stipm, pars = "adult_pred")$summary |>
 ```
 
 
-# Can delete soon
+# Can delete
 
 ```{r test_2050s, eval=FALSE}
 #further into future just with larger n_year? oh yes.
